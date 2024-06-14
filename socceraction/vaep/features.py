@@ -7,14 +7,49 @@ import pandas as pd  # type: ignore
 from pandera.typing import DataFrame
 
 import socceraction.spadl.config as spadlcfg
-from socceraction.atomic.spadl import AtomicSPADLSchema
-from socceraction.spadl.schema import SPADLSchema
+# from socceraction.atomic.spadl import AtomicSPADLSchema
+from socceraction.spadl.schema import SPADLSchema_360
 
-SPADLActions = DataFrame[SPADLSchema]
-Actions = Union[DataFrame[SPADLSchema], DataFrame[AtomicSPADLSchema]]
+# SPADLActions = DataFrame[SPADLSchema]
+SPADLActions = DataFrame[SPADLSchema_360]
+# Actions = Union[DataFrame[SPADLSchema], DataFrame[AtomicSPADLSchema]]
+Actions = Union[DataFrame[SPADLSchema_360]]
 GameStates = list[Actions]
 Features = DataFrame[Any]
 FeatureTransfomer = Callable[[GameStates], Features]
+
+
+NUM_PLAYERS = 22
+DIMENTION = 2
+NUM_FEATURES_PLAYER = 4
+GOAL_X = spadlcfg.FIELD_LENGTH
+GOAL_Y = spadlcfg.FIELD_WIDTH / 2
+
+# Penalty area in statsbomb coordinates
+PENALTY_LEFT_STATSBOMB = 102.0
+PENALTY_TOP_STATSBOMB = 18.0
+PENALTY_BOTTOM_STATSBOMB = 62.0
+
+# Penalty area in spadl coordinates
+PENALTY_LEFT = (
+    PENALTY_LEFT_STATSBOMB 
+    / spadlcfg.FIELD_LENGTH_STATSBOMB 
+    * spadlcfg.FIELD_LENGTH
+) # 102 / 120 * 105 = 89.25
+
+PENALTY_TOP = (
+    spadlcfg.FIELD_WIDTH
+    - (PENALTY_TOP_STATSBOMB
+    / spadlcfg.FIELD_WIDTH_STATSBOMB
+    * spadlcfg.FIELD_WIDTH)
+) # 68 - 18 / 120 * 105 = 68 - 15.75 = 52.25
+
+PENALTY_BOTTOM = (
+    spadlcfg.FIELD_WIDTH
+    - (PENALTY_BOTTOM_STATSBOMB
+    / spadlcfg.FIELD_WIDTH_STATSBOMB
+    * spadlcfg.FIELD_WIDTH)
+) # 68 - 62 / 120 * 105 = 68 - 54.75 = 15.25
 
 
 def feature_column_names(fs: list[FeatureTransfomer], nb_prev_actions: int = 3) -> list[str]:
@@ -50,6 +85,8 @@ def feature_column_names(fs: list[FeatureTransfomer], nb_prev_actions: int = 3) 
         'bodypart_name',
         'type_id',
         'type_name',
+        "away_team",  # add
+        "freeze_frame_360",  # add
     ]
     dummy_actions = pd.DataFrame(np.zeros((10, len(spadlcolumns))), columns=spadlcolumns)
     for c in spadlcolumns:
@@ -122,9 +159,9 @@ def play_left_to_right(gamestates: GameStates, home_team_id: int) -> GameStates:
     away_idx = a0.team_id != home_team_id
     for actions in gamestates:
         for col in ['start_x', 'end_x']:
-            actions.loc[away_idx, col] = spadlcfg.field_length - actions[away_idx][col].values
+            actions.loc[away_idx, col] = spadlcfg.FIELD_LENGTH - actions[away_idx][col].values
         for col in ['start_y', 'end_y']:
-            actions.loc[away_idx, col] = spadlcfg.field_width - actions[away_idx][col].values
+            actions.loc[away_idx, col] = spadlcfg.FIELD_WIDTH - actions[away_idx][col].values
     return gamestates
 
 
@@ -481,8 +518,8 @@ def endlocation(actions: SPADLActions) -> Features:
     return actions[['end_x', 'end_y']]
 
 
-_goal_x: float = spadlcfg.field_length
-_goal_y: float = spadlcfg.field_width / 2
+_goal_x: float = spadlcfg.FIELD_LENGTH
+_goal_y: float = spadlcfg.FIELD_WIDTH / 2
 
 
 @simple
@@ -728,3 +765,175 @@ def goalscore(gamestates: GameStates) -> Features:
     scoredf['goalscore_opponent'] = (goalscoreteamB * teamisA) + (goalscoreteamA * teamisB)
     scoredf['goalscore_diff'] = scoredf['goalscore_team'] - scoredf['goalscore_opponent']
     return scoredf
+
+
+# ADDED FOR VDEP
+
+
+@simple
+def away_team(actions):
+    return actions[["away_team"]]
+
+
+@simple
+def player_loc_dist(actions):
+    NUM_PLAYERS_TEAM = int(NUM_PLAYERS / 2)
+    df = pd.DataFrame()
+    locations = np.zeros(
+        (len(actions), NUM_PLAYERS * DIMENTION)
+        )
+    for ev in range(len(actions)):
+        locations[ev] = np.array(
+            actions.loc[ev].freeze_frame_360
+            )
+
+    ball_location = np.concatenate(
+        [
+            np.array(actions["start_x"])[:, np.newaxis],
+            np.array(actions["start_y"])[:, np.newaxis],
+        ],
+        1,
+    )
+    ball2_players = (
+        locations.reshape((-1, NUM_PLAYERS, DIMENTION))
+        - np.repeat(
+            ball_location[:, np.newaxis, :], NUM_PLAYERS, 1
+            )
+        )
+    distances_ = np.sqrt(np.sum(ball2_players**2, 2))
+    min_dist = 0.1
+    # Feature importance
+    distances = distances_.copy()
+    distances[distances_ > 0] = 1 / distances_[distances_ > 0]
+    distances[distances_ < min_dist] = 1 / min_dist  # to avoid zero division
+
+    goal_location = np.array([GOAL_X, GOAL_Y])
+    vec2goal = (
+        np.repeat(
+            np.repeat(
+                goal_location[np.newaxis, np.newaxis, :],
+                locations.shape[0],
+                0
+                ), NUM_PLAYERS, 1,
+            ) 
+        - locations.reshape((-1, NUM_PLAYERS, DIMENTION))
+        )
+
+    cols = []
+    data = np.empty(
+        (len(actions), NUM_PLAYERS * NUM_FEATURES_PLAYER)
+        )
+    for pl in range(NUM_PLAYERS_TEAM):
+        # atk: attacker, dfd: defender
+        cols.extend(
+            [
+                f"atk{pl}_x",
+                f"atk{pl}_y",
+                f"dist_atk{pl}",
+                f"angle_atk{pl}",
+                f"dfd{pl}_x",
+                f"dfd{pl}_y",
+                f"dist_dfd{pl}",
+                f"angle_dfd{pl}",
+            ]
+        )
+        idx_atk = pl
+        idx_dfd = pl + NUM_PLAYERS_TEAM
+
+        # Sort features in the above order
+        # atk_x
+        data[:, idx_atk * NUM_FEATURES_PLAYER] = np.nan_to_num(
+            locations[:, idx_atk * DIMENTION],
+            nan = -spadlcfg.FIELD_LENGTH,
+            )
+        # atk_y
+        data[:, idx_atk * NUM_FEATURES_PLAYER + 1] = np.nan_to_num(
+            locations[:, idx_atk * DIMENTION + 1],
+            nan = -spadlcfg.FIELD_WIDTH,
+            )
+        # atk_dist
+        data[:, idx_atk * NUM_FEATURES_PLAYER + 2] = np.nan_to_num(
+            distances[:, idx_atk],
+            nan = 0,
+        )
+        # atk_angle
+        data[:, idx_atk * NUM_FEATURES_PLAYER + 3] = np.nan_to_num(
+            np.arctan(
+                (vec2goal[:, idx_atk, 1] / vec2goal[:, idx_atk, 0])
+            ),
+            nan = 0,
+        )
+        # dfd_x
+        data[:, idx_dfd * NUM_FEATURES_PLAYER] = np.nan_to_num(
+            locations[:, idx_dfd * DIMENTION],
+            nan = -spadlcfg.FIELD_LENGTH,
+        )
+        # dfd_y
+        data[:, idx_dfd * NUM_FEATURES_PLAYER + 1] = np.nan_to_num(
+            locations[:, idx_dfd * DIMENTION + 1],
+            nan = -spadlcfg.FIELD_WIDTH,
+        )
+        # dfd_dist
+        data[:, idx_dfd * NUM_FEATURES_PLAYER + 2] = np.nan_to_num(
+            distances[:, idx_dfd],
+            nan = 0,
+        )
+        # dfd_angle
+        data[:, idx_dfd * NUM_FEATURES_PLAYER + 3] = np.nan_to_num(
+            np.arctan(
+                (vec2goal[:, idx_dfd, 1] / vec2goal[:, idx_dfd, 0])
+            ),
+            nan = 0,
+        )
+    if np.isnan(data).any():
+        print("NAN in player_loc_dist")
+    df = pd.DataFrame(data=data, columns=cols)
+
+    return df
+
+
+@simple
+def gain(actions):
+    df = pd.DataFrame()
+    offside = actions["result_name"] == "offside"
+    regains = (
+        (actions["type_name"] == "tackle") | (actions["type_name"] == "interception")
+    ) & (actions["result_id"] == 1)
+    change_period_id = (
+        actions["period_id"] - actions["period_id"].shift(1)
+        ).fillna(0) != 0
+    on_penalty_id = actions["period_id"] == spadlcfg.ON_PENALTY_PERIOD_ID
+
+    gains = (
+        (offside | regains) & (~change_period_id & ~on_penalty_id)
+        )
+    df["regain"] = gains
+
+    return df
+
+
+@simple
+def penetration(actions):
+    df = pd.DataFrame()
+    end_nan = actions["end_x"].isna()
+    x = actions["start_x"]
+    y = actions["start_y"]
+    x_e = actions["end_x"]
+    y_e = actions["end_y"]
+
+    penetrate = (
+        (x_e >= PENALTY_LEFT)
+        & (x_e <= spadlcfg.FIELD_LENGTH)
+        & (y_e >= PENALTY_BOTTOM)
+        & (y_e <= PENALTY_TOP)
+        & (actions["period_id"] < spadlcfg.ON_PENALTY_PERIOD_ID)
+    )
+    penetrate.loc[end_nan] = (
+        (x.loc[end_nan] >= PENALTY_LEFT)
+        & (x.loc[end_nan] <= spadlcfg.FIELD_LENGTH)
+        & (y.loc[end_nan] >= PENALTY_BOTTOM)
+        & (y.loc[end_nan] <= PENALTY_TOP)
+        & (actions["period_id"] < spadlcfg.ON_PENALTY_PERIOD_ID)
+    )
+    df["penetration"] = penetrate
+    return df

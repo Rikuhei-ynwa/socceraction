@@ -39,9 +39,9 @@ def _add_dribbles(actions: pd.DataFrame) -> pd.DataFrame:
 
     same_team = actions.team_id == next_actions.team_id
     # not_clearance = actions.type_id != actiontypes.index("clearance")
-    not_offensive_foul = same_team & (
-        next_actions.type_id != spadlconfig.actiontypes.index('foul')
-    )
+    # not_offensive_foul = same_team & (
+    #     next_actions.type_id != spadlconfig.actiontypes.index('foul')
+    # )
     not_headed_shot = (next_actions.type_id != spadlconfig.actiontypes.index('shot')) & (
         next_actions.bodypart_id != spadlconfig.bodyparts.index('head')
     )
@@ -61,7 +61,7 @@ def _add_dribbles(actions: pd.DataFrame) -> pd.DataFrame:
         & not_too_far
         & same_phase
         & same_period
-        & not_offensive_foul
+        # & not_offensive_foul
         & not_headed_shot
     )
 
@@ -83,6 +83,9 @@ def _add_dribbles(actions: pd.DataFrame) -> pd.DataFrame:
     dribbles['bodypart_id'] = spadlconfig.bodyparts.index('foot')
     dribbles['type_id'] = spadlconfig.actiontypes.index('dribble')
     dribbles['result_id'] = spadlconfig.results.index('success')
+    dribbles['away_team'] = prev.away_team
+    dribbles['freeze_frame_360'] = prev.freeze_frame_360
+    dribbles['visible_area_360'] = prev.visible_area_360
 
     actions = pd.concat([actions, dribbles], ignore_index=True, sort=False)
     actions = actions.sort_values(['game_id', 'period_id', 'action_id']).reset_index(drop=True)
